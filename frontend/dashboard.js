@@ -365,6 +365,121 @@ const ENDPOINTS = {
 
   function disableApi(v) { ["getInsights", "getRecipes", "getClusters"].forEach((id) => { const b = $(id); if (b) b.disabled = v; }); }
 
+  /* --------------------------- Account panel + logout --------------------------- */
+  function sb() { return window.supabaseClient || null; }
+
+  function initAccountPanel(user) {
+    const acct = $("accountPanel"), out = $("signedOutPanel");
+    if (user) {
+      acct.hidden = false; out.hidden = true;
+      $("acctEmail").textContent = user.email || (user.user_metadata && user.user_metadata.email) || "your account";
+      const p = user.app_metadata && user.app_metadata.provider;
+      $("acctProvider").textContent = p ? "· via " + p : "";
+      $("panelLogout").addEventListener("click", async () => {
+        const c = sb(); if (c) await c.auth.signOut();
+        window.location.href = "index.html";
+      });
+    } else {
+      acct.hidden = true; out.hidden = false;
+    }
+  }
+
+  /* --------------------------- 2FA (Supabase MFA / TOTP) --------------------------- */
+  let mfaFactorId = null, mfaVerifiedId = null;
+
+  function mfaShow(state) { // "enroll" | "setup" | "enabled"
+    $("mfaEnroll").hidden = state !== "enroll";
+    $("mfaSetup").hidden = state !== "setup";
+    $("mfaEnabled").hidden = state !== "enabled";
+  }
+  function mfaMsg(m, ok) {
+    const e = $("mfaMsg");
+    e.textContent = m || "";
+    e.className = "text-sm mt-3 " + (ok ? "text-green-700" : (m ? "text-red-600" : ""));
+  }
+  function showQr(qr) {
+    const box = $("mfaQr");
+    if (typeof qr === "string" && qr.trim().slice(0, 4).toLowerCase() === "<svg") box.innerHTML = qr;
+    else box.innerHTML = '<img alt="2FA QR code" width="180" height="180" src="' + qr + '">';
+  }
+
+  async function refreshMfa() {
+    const c = sb();
+    if (!c || !c.auth.mfa) { $("mfaStatus").textContent = "2FA is unavailable in this environment."; return; }
+    const { data, error } = await c.auth.mfa.listFactors();
+    if (error) { $("mfaStatus").textContent = "Could not check 2FA status: " + error.message; return; }
+    const totp = (data && data.totp) || [];
+    const verified = totp.find((f) => f.status === "verified");
+    if (verified) {
+      mfaVerifiedId = verified.id;
+      $("mfaStatus").textContent = "Your account is protected by an authenticator app.";
+      mfaShow("enabled");
+    } else {
+      $("mfaStatus").textContent = "Not enabled. Add a second layer of security with an authenticator app.";
+      mfaShow("enroll");
+    }
+  }
+
+  async function enable2fa() {
+    const c = sb(); if (!c) return;
+    mfaMsg("");
+    try {
+      // Remove any leftover unverified factor from a previous attempt.
+      const list = await c.auth.mfa.listFactors();
+      const stale = (((list.data && list.data.totp) || []).filter((f) => f.status !== "verified"));
+      for (const f of stale) { try { await c.auth.mfa.unenroll({ factorId: f.id }); } catch (e) {} }
+
+      const { data, error } = await c.auth.mfa.enroll({ factorType: "totp", friendlyName: "Authenticator " + Date.now() });
+      if (error) throw error;
+      mfaFactorId = data.id;
+      showQr(data.totp.qr_code);
+      mfaShow("setup");
+      $("twofa").value = "";
+      $("twofa").focus();
+    } catch (err) { mfaMsg("Could not start 2FA setup: " + err.message, false); }
+  }
+
+  async function verify2fa() {
+    const c = sb(); if (!c || !mfaFactorId) return;
+    const code = $("twofa").value.trim();
+    if (!/^\d{6}$/.test(code)) { mfaMsg("Enter the 6-digit code from your authenticator app.", false); return; }
+    mfaMsg("Verifying…");
+    try {
+      const ch = await c.auth.mfa.challenge({ factorId: mfaFactorId });
+      if (ch.error) throw ch.error;
+      const v = await c.auth.mfa.verify({ factorId: mfaFactorId, challengeId: ch.data.id, code: code });
+      if (v.error) throw v.error;
+      mfaMsg("2FA activated successfully.", true);
+      await refreshMfa();
+    } catch (err) { mfaMsg("Verification failed: " + err.message, false); }
+  }
+
+  async function disable2fa() {
+    const c = sb(); if (!c || !mfaVerifiedId) return;
+    mfaMsg("Removing 2FA…");
+    try {
+      const { error } = await c.auth.mfa.unenroll({ factorId: mfaVerifiedId });
+      if (error) throw error;
+      mfaVerifiedId = null;
+      mfaMsg("2FA disabled.", true);
+      await refreshMfa();
+    } catch (err) { mfaMsg("Could not disable 2FA: " + err.message, false); }
+  }
+
+  function initSecurity() {
+    $("enable2fa").addEventListener("click", enable2fa);
+    $("verify2fa").addEventListener("click", verify2fa);
+    $("disable2fa").addEventListener("click", disable2fa);
+    $("cancel2fa").addEventListener("click", () => { mfaShow("enroll"); mfaMsg(""); });
+    refreshMfa();
+  }
+
+  /* --------------------------- Cloud cleanup (informational only) --------------------------- */
+  function initCleanup() {
+    const btn = $("cleanupBtn"); if (!btn) return;
+    btn.addEventListener("click", () => { const i = $("cleanupInfo"); if (i) i.hidden = !i.hidden; });
+  }
+
   /* --------------------------- Init --------------------------- */
   function onFilterChange() {
     if (insights) renderCharts();
@@ -372,14 +487,15 @@ const ENDPOINTS = {
   }
 
   async function start() {
-    // Only load data for a signed-in user (dashboard.html's auth script
-    // handles the redirect for anonymous visitors).
+    initCleanup();
+    let user = null;
     try {
-      if (window.supabaseClient) {
-        const { data } = await window.supabaseClient.auth.getSession();
-        if (!data || !data.session) return;
-      }
-    } catch (e) { /* if auth check fails, still attempt to load */ }
+      const c = sb();
+      if (c) { const { data } = await c.auth.getSession(); user = data && data.session ? data.session.user : null; }
+    } catch (e) {}
+    initAccountPanel(user);
+    if (!user) return; // anonymous: dashboard.html's auth script handles the redirect
+    initSecurity();
 
     $("getInsights").addEventListener("click", loadInsights);
     $("getRecipes").addEventListener("click", () => loadRecipes(1));
