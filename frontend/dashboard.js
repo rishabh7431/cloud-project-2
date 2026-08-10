@@ -4,7 +4,7 @@
    to the Azure Function. Auth is handled separately in dashboard.html
    (Supabase); this script only runs for a signed-in user.
    ========================================================================== */
-const API_BASE = "https://project2-func-gsfhenfdbae0bsh9.eastus-01.azurewebsites.net/api";
+const API_BASE = "https://projectpart3function-fxe6ddgfdhffecc6.canadacentral-01.azurewebsites.net/api";
 const ENDPOINTS = {
   INSIGHTS: API_BASE + "/analyze_diets",
   RECIPES: API_BASE + "/recipes",
