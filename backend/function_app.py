@@ -456,6 +456,91 @@ def load_dashboard_cache():
 
 
 # -----------------------------------------------------------------------------
+# Change detection: re-run the cleaning step only when All_Diets.csv changes
+# -----------------------------------------------------------------------------
+
+def get_source_blob_marker():
+    """Return a change marker (ETag) for the source All_Diets.csv, or None."""
+    container_name = os.getenv("DIET_CONTAINER_NAME", "diet-data")
+    blob_name = os.getenv("DIET_BLOB_NAME", "All_Diets.csv")
+
+    try:
+        blob_client = get_blob_service_client().get_blob_client(
+            container=container_name,
+            blob=blob_name,
+        )
+        props = blob_client.get_blob_properties()
+
+        if props.etag:
+            return str(props.etag)
+        if props.last_modified:
+            return props.last_modified.isoformat()
+    except Exception:
+        logging.exception("Could not read source blob properties.")
+
+    return None
+
+
+def run_processing_pipeline(marker=None):
+    """Clean the source once, save the cleaned CSV, compute and cache results."""
+    df, source_container, source_blob = load_and_clean_dataset()
+    save_cleaned_dataset(df)
+
+    result = calculate_dashboard_results(df, source_container, source_blob)
+    result.setdefault("metadata", {})["source_etag"] = (
+        marker if marker is not None else get_source_blob_marker()
+    )
+
+    save_dashboard_cache(result)
+    logging.info("Cleaning + result calculation complete.")
+    return result
+
+
+def ensure_fresh_cache(force=False):
+    """
+    Return dashboard results, re-running the cleaning step ONLY when needed:
+    - force=True (manual "refresh" request), or
+    - no cache exists yet, or
+    - All_Diets.csv has changed (its ETag differs from the cached one).
+
+    Otherwise the pre-calculated cache is returned unchanged, so cleaning is
+    never repeated for unchanged data.
+    """
+    current_marker = get_source_blob_marker()
+
+    if force:
+        logging.info("Forced refresh: re-running the data cleaning step.")
+        result = run_processing_pipeline(current_marker)
+        result.setdefault("metadata", {})["cache_hit"] = False
+        return result
+
+    cached = None
+    try:
+        cached = load_dashboard_cache()
+    except Exception:
+        cached = None
+
+    cached_marker = None
+    if isinstance(cached, dict):
+        cached_marker = (cached.get("metadata") or {}).get("source_etag")
+
+    source_changed = current_marker is not None and cached_marker != current_marker
+
+    if cached is None or source_changed:
+        logging.info(
+            "Re-running cleaning (cache_missing=%s, source_changed=%s).",
+            cached is None,
+            source_changed,
+        )
+        result = run_processing_pipeline(current_marker)
+        result.setdefault("metadata", {})["cache_hit"] = False
+        return result
+
+    cached.setdefault("metadata", {})["cache_hit"] = True
+    return cached
+
+
+# -----------------------------------------------------------------------------
 # Blob Trigger
 # Watches: diet-data/All_Diets.csv
 # -----------------------------------------------------------------------------
@@ -485,27 +570,8 @@ def process_diet_file(blob: func.InputStream):
     )
 
     try:
-        df, source_container, source_blob = load_and_clean_dataset()
-
-        logging.info(
-            "Dataset cleaned successfully. %s records processed.",
-            len(df),
-        )
-
-        save_cleaned_dataset(df)
-
-        logging.info("Starting dashboard calculations.")
-        dashboard_results = calculate_dashboard_results(
-            df,
-            source_container,
-            source_blob,
-        )
-
-        save_dashboard_cache(dashboard_results)
-
-        logging.info(
-            "Phase 3 processing completed successfully."
-        )
+        run_processing_pipeline()
+        logging.info("Phase 3 processing completed successfully.")
 
     except Exception:
         logging.exception(
@@ -532,7 +598,12 @@ def analyze_diets(req: func.HttpRequest) -> func.HttpResponse:
     start_time = time.perf_counter()
 
     try:
-        result = load_dashboard_cache()
+        # ?refresh=1 forces the cleaning step to run again; otherwise it runs
+        # automatically only when All_Diets.csv has changed.
+        refresh_param = (req.params.get("refresh", "") or "").strip().lower()
+        force = refresh_param in ("1", "true", "yes")
+
+        result = ensure_fresh_cache(force=force)
 
         execution_time = round(
             time.perf_counter() - start_time,
@@ -546,7 +617,6 @@ def analyze_diets(req: func.HttpRequest) -> func.HttpResponse:
         result["metadata"]["data_source"] = (
             "dashboard-cache/dashboard_cache.json"
         )
-        result["metadata"]["cache_hit"] = True
 
         return json_response(result)
 
@@ -589,6 +659,13 @@ def get_recipes(req: func.HttpRequest) -> func.HttpResponse:
     start_time = time.perf_counter()
 
     try:
+        # Re-clean first if All_Diets.csv changed, so recipes reflect the
+        # latest data (kept resilient: never blocks recipes on a cache error).
+        try:
+            ensure_fresh_cache()
+        except Exception:
+            logging.exception("Freshness check failed; using existing cleaned data.")
+
         df = load_cleaned_dataset()
 
         diet_type = req.params.get("diet_type", "all").strip()
@@ -744,7 +821,7 @@ def get_clusters(req: func.HttpRequest) -> func.HttpResponse:
     start_time = time.perf_counter()
 
     try:
-        cached_result = load_dashboard_cache()
+        cached_result = ensure_fresh_cache()
         clusters = cached_result.get("clusters", [])
 
         execution_time = round(
