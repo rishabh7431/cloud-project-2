@@ -206,17 +206,21 @@ const ENDPOINTS = {
   }
 
   /* --------------------------- Insights --------------------------- */
-  async function loadInsights() {
+  async function loadInsights(force) {
+    const btn = $("getInsights");
+    const label = btn ? btn.textContent : "";
+    if (btn) btn.textContent = "Loading…";
     disableApi(true);
-    setStatus("Loading nutritional insights...");
+    setStatus(force ? "Re-running data cleaning…" : "Loading nutritional insights...");
     try {
-      const out = await fetchJson(ENDPOINTS.INSIGHTS);
+      const url = ENDPOINTS.INSIGHTS + (force ? "?refresh=1" : "");
+      const out = await fetchJson(url);
       insights = out.payload;
       const meta = insights.metadata || {};
       populateDietFilter((insights.filters && insights.filters.diet_types) || []);
       renderCharts();
       setStatus(
-        "Loaded " + (meta.total_recipes != null ? meta.total_recipes.toLocaleString() : "?") +
+        "✓ Loaded " + (meta.total_recipes != null ? meta.total_recipes.toLocaleString() : "?") +
         " recipes across " + (meta.total_diet_types != null ? meta.total_diet_types : "?") +
         " diet types · execution time " + fmtExec(meta.execution_time_seconds, out.ms), "ok");
     } catch (err) {
@@ -224,6 +228,7 @@ const ENDPOINTS = {
       setStatus("Could not load insights: " + err.message + " (check the function URL / CORS).", "error");
     } finally {
       disableApi(false);
+      if (btn) btn.textContent = label && label !== "Loading…" ? label : "Get Nutritional Insights";
     }
   }
 
@@ -466,6 +471,49 @@ const ENDPOINTS = {
     } catch (err) { mfaMsg("Could not disable 2FA: " + err.message, false); }
   }
 
+  // Enforce 2FA at login: if the user has a verified authenticator but the
+  // session is only aal1, require the code before the dashboard is usable.
+  // Covers both email/password and Google logins (all land on this page).
+  async function enforceMfa(client) {
+    if (!client || !client.auth.mfa) return true;
+    let aal;
+    try {
+      const { data } = await client.auth.mfa.getAuthenticatorAssuranceLevel();
+      aal = data;
+    } catch (e) { return true; } // can't determine → don't lock the user out
+    if (!aal || !(aal.nextLevel === "aal2" && aal.currentLevel === "aal1")) return true;
+
+    return new Promise((resolve) => {
+      const gate = $("mfaGate"), code = $("mfaGateCode"), msg = $("mfaGateMsg");
+      const vBtn = $("mfaGateVerify"), cBtn = $("mfaGateCancel");
+      gate.hidden = false; code.value = ""; msg.textContent = ""; code.focus();
+
+      async function doVerify() {
+        const c = code.value.trim();
+        if (!/^\d{6}$/.test(c)) { msg.className = "text-sm text-red-600 mb-3"; msg.textContent = "Enter the 6-digit code."; return; }
+        msg.className = "text-sm text-gray-600 mb-3"; msg.textContent = "Verifying…";
+        try {
+          const factors = await client.auth.mfa.listFactors();
+          const totp = (((factors.data && factors.data.totp) || []).find((f) => f.status === "verified"));
+          if (!totp) throw new Error("No verified authenticator found.");
+          const ch = await client.auth.mfa.challenge({ factorId: totp.id });
+          if (ch.error) throw ch.error;
+          const v = await client.auth.mfa.verify({ factorId: totp.id, challengeId: ch.data.id, code: c });
+          if (v.error) throw v.error;
+          cleanup(); gate.hidden = true; resolve(true);
+        } catch (err) {
+          msg.className = "text-sm text-red-600 mb-3";
+          msg.textContent = "Verification failed: " + err.message;
+        }
+      }
+      function doCancel() { cleanup(); gate.hidden = true; resolve(false); }
+      function cleanup() { vBtn.removeEventListener("click", doVerify); cBtn.removeEventListener("click", doCancel); }
+      vBtn.addEventListener("click", doVerify);
+      cBtn.addEventListener("click", doCancel);
+      code.addEventListener("keydown", (e) => { if (e.key === "Enter") doVerify(); });
+    });
+  }
+
   function initSecurity() {
     $("enable2fa").addEventListener("click", enable2fa);
     $("verify2fa").addEventListener("click", verify2fa);
@@ -474,10 +522,37 @@ const ENDPOINTS = {
     refreshMfa();
   }
 
-  /* --------------------------- Cloud cleanup (informational only) --------------------------- */
+  /* --------------------------- Cloud cleanup (clear cached data + refresh) --------------------------- */
   function initCleanup() {
+    const toggle = $("cleanupInfoToggle");
+    if (toggle) toggle.addEventListener("click", () => { const i = $("cleanupInfo"); if (i) i.hidden = !i.hidden; });
+
     const btn = $("cleanupBtn"); if (!btn) return;
-    btn.addEventListener("click", () => { const i = $("cleanupInfo"); if (i) i.hidden = !i.hidden; });
+    btn.addEventListener("click", async () => {
+      const msg = $("cleanupMsg");
+      const label = btn.textContent;
+      btn.disabled = true; btn.textContent = "Cleaning up…";
+      if (msg) msg.textContent = "";
+      try {
+        // Clear client-side cached data (login stays intact — Supabase uses localStorage).
+        try { sessionStorage.clear(); } catch (e) {}
+        if (window.caches && caches.keys) {
+          try { const keys = await caches.keys(); await Promise.all(keys.map((k) => caches.delete(k))); } catch (e) {}
+        }
+        // Reset the app's in-memory cache and UI state.
+        insights = null; activePanel = null;
+        const results = $("results"); if (results) { results.hidden = true; results.innerHTML = ""; }
+        if ($("searchInput")) $("searchInput").value = "";
+        if ($("dietFilter")) $("dietFilter").value = "all";
+        // Force the backend to re-run the data cleaning step, then reload.
+        await loadInsights(true);
+        if (msg) { msg.textContent = "✓ Cleaned up — data cleaning re-run on the current CSV and fresh results loaded."; msg.className = "text-sm text-green-700 mt-3"; }
+      } catch (err) {
+        if (msg) { msg.textContent = "Cleanup failed: " + err.message; msg.className = "text-sm text-red-600 mt-3"; }
+      } finally {
+        btn.disabled = false; btn.textContent = label;
+      }
+    });
   }
 
   /* --------------------------- Init --------------------------- */
@@ -495,9 +570,18 @@ const ENDPOINTS = {
     } catch (e) {}
     initAccountPanel(user);
     if (!user) return; // anonymous: dashboard.html's auth script handles the redirect
+
+    // Enforce 2FA before the dashboard becomes usable.
+    const passed = await enforceMfa(sb());
+    if (!passed) {
+      const c = sb(); if (c) await c.auth.signOut();
+      window.location.href = "index.html";
+      return;
+    }
+
     initSecurity();
 
-    $("getInsights").addEventListener("click", loadInsights);
+    $("getInsights").addEventListener("click", () => loadInsights(false));
     $("getRecipes").addEventListener("click", () => loadRecipes(1));
     $("getClusters").addEventListener("click", loadClusters);
     $("dietFilter").addEventListener("change", onFilterChange);

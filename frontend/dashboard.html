@@ -13,6 +13,20 @@
 </head>
 <body class="bg-gray-100">
 
+    <!-- 2FA challenge gate (blocks the dashboard until the code is verified) -->
+    <div id="mfaGate" class="fixed inset-0 bg-gray-900 bg-opacity-70 flex items-center justify-center p-4 z-50" hidden>
+        <div class="bg-white rounded-lg shadow-xl p-6 w-full max-w-sm">
+            <h2 class="text-xl font-semibold mb-2">Two-Factor Authentication</h2>
+            <p class="text-sm text-gray-600 mb-4">Enter the 6-digit code from your authenticator app to continue.</p>
+            <input id="mfaGateCode" type="text" inputmode="numeric" autocomplete="one-time-code" class="p-2 border rounded w-full mb-2" placeholder="6-digit code">
+            <p id="mfaGateMsg" class="text-sm text-red-600 mb-3" role="alert"></p>
+            <div class="flex gap-2">
+                <button id="mfaGateVerify" class="bg-blue-600 text-white py-2 px-4 rounded">Verify</button>
+                <button id="mfaGateCancel" class="bg-gray-300 text-gray-800 py-2 px-4 rounded">Cancel</button>
+            </div>
+        </div>
+    </div>
+
     <header class="bg-blue-600 p-4 text-white flex items-center justify-between">
         <h1 class="text-3xl font-semibold">Nutritional Insights</h1>
 
@@ -143,10 +157,12 @@
         <section class="mb-8">
             <h2 class="text-2xl font-semibold mb-4">Cloud Resource Cleanup</h2>
             <div class="bg-white p-4 shadow-lg rounded-lg">
-                <p class="text-sm text-gray-600 mb-3">Cloud resources are cleaned up by an administrator, not from this app &mdash; deleting infrastructure requires privileged credentials that must never live in a public web page.</p>
-                <button id="cleanupBtn" class="bg-red-600 text-white py-2 px-4 rounded">How to clean up</button>
-                <div id="cleanupInfo" class="mt-3 text-sm text-gray-700" hidden>
-                    <p class="mb-1">An administrator removes all resources by deleting the resource group in Azure:</p>
+                <p class="text-sm text-gray-600 mb-3">Clears cached data and re-runs the data cleaning step on the current <code>All_Diets.csv</code>, then reloads fresh results. It regenerates the processed/cleaned data &mdash; it does not delete any cloud infrastructure.</p>
+                <button id="cleanupBtn" class="bg-red-600 text-white py-2 px-4 rounded">Clean Up Resources</button>
+                <p id="cleanupMsg" class="text-sm text-green-700 mt-3" role="status"></p>
+                <button id="cleanupInfoToggle" type="button" class="block mt-3 text-sm text-gray-600 underline">How is cloud infrastructure removed?</button>
+                <div id="cleanupInfo" class="mt-2 text-sm text-gray-700" hidden>
+                    <p class="mb-1">Infrastructure teardown is done by an administrator (not from this app), by deleting the resource group:</p>
                     <pre class="bg-gray-100 rounded p-2 overflow-x-auto"><code>az group delete --name &lt;your-resource-group&gt; --yes</code></pre>
                     <p class="mt-1">Or via the Azure Portal &rarr; Resource groups &rarr; Delete resource group.</p>
                 </div>
