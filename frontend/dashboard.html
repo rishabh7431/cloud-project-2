@@ -13,20 +13,6 @@
 </head>
 <body class="bg-gray-100">
 
-    <!-- 2FA challenge gate (blocks the dashboard until the code is verified) -->
-    <div id="mfaGate" class="fixed inset-0 bg-gray-900 bg-opacity-70 flex items-center justify-center p-4 z-50" hidden>
-        <div class="bg-white rounded-lg shadow-xl p-6 w-full max-w-sm">
-            <h2 class="text-xl font-semibold mb-2">Two-Factor Authentication</h2>
-            <p class="text-sm text-gray-600 mb-4">Enter the 6-digit code from your authenticator app to continue.</p>
-            <input id="mfaGateCode" type="text" inputmode="numeric" autocomplete="one-time-code" class="p-2 border rounded w-full mb-2" placeholder="6-digit code">
-            <p id="mfaGateMsg" class="text-sm text-red-600 mb-3" role="alert"></p>
-            <div class="flex gap-2">
-                <button id="mfaGateVerify" class="bg-blue-600 text-white py-2 px-4 rounded">Verify</button>
-                <button id="mfaGateCancel" class="bg-gray-300 text-gray-800 py-2 px-4 rounded">Cancel</button>
-            </div>
-        </div>
-    </div>
-
     <header class="bg-blue-600 p-4 text-white flex items-center justify-between">
         <h1 class="text-3xl font-semibold">Nutritional Insights</h1>
 

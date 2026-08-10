@@ -471,49 +471,6 @@ const ENDPOINTS = {
     } catch (err) { mfaMsg("Could not disable 2FA: " + err.message, false); }
   }
 
-  // Enforce 2FA at login: if the user has a verified authenticator but the
-  // session is only aal1, require the code before the dashboard is usable.
-  // Covers both email/password and Google logins (all land on this page).
-  async function enforceMfa(client) {
-    if (!client || !client.auth.mfa) return true;
-    let aal;
-    try {
-      const { data } = await client.auth.mfa.getAuthenticatorAssuranceLevel();
-      aal = data;
-    } catch (e) { return true; } // can't determine → don't lock the user out
-    if (!aal || !(aal.nextLevel === "aal2" && aal.currentLevel === "aal1")) return true;
-
-    return new Promise((resolve) => {
-      const gate = $("mfaGate"), code = $("mfaGateCode"), msg = $("mfaGateMsg");
-      const vBtn = $("mfaGateVerify"), cBtn = $("mfaGateCancel");
-      gate.hidden = false; code.value = ""; msg.textContent = ""; code.focus();
-
-      async function doVerify() {
-        const c = code.value.trim();
-        if (!/^\d{6}$/.test(c)) { msg.className = "text-sm text-red-600 mb-3"; msg.textContent = "Enter the 6-digit code."; return; }
-        msg.className = "text-sm text-gray-600 mb-3"; msg.textContent = "Verifying…";
-        try {
-          const factors = await client.auth.mfa.listFactors();
-          const totp = (((factors.data && factors.data.totp) || []).find((f) => f.status === "verified"));
-          if (!totp) throw new Error("No verified authenticator found.");
-          const ch = await client.auth.mfa.challenge({ factorId: totp.id });
-          if (ch.error) throw ch.error;
-          const v = await client.auth.mfa.verify({ factorId: totp.id, challengeId: ch.data.id, code: c });
-          if (v.error) throw v.error;
-          cleanup(); gate.hidden = true; resolve(true);
-        } catch (err) {
-          msg.className = "text-sm text-red-600 mb-3";
-          msg.textContent = "Verification failed: " + err.message;
-        }
-      }
-      function doCancel() { cleanup(); gate.hidden = true; resolve(false); }
-      function cleanup() { vBtn.removeEventListener("click", doVerify); cBtn.removeEventListener("click", doCancel); }
-      vBtn.addEventListener("click", doVerify);
-      cBtn.addEventListener("click", doCancel);
-      code.addEventListener("keydown", (e) => { if (e.key === "Enter") doVerify(); });
-    });
-  }
-
   function initSecurity() {
     $("enable2fa").addEventListener("click", enable2fa);
     $("verify2fa").addEventListener("click", verify2fa);
@@ -571,12 +528,17 @@ const ENDPOINTS = {
     initAccountPanel(user);
     if (!user) return; // anonymous: dashboard.html's auth script handles the redirect
 
-    // Enforce 2FA before the dashboard becomes usable.
-    const passed = await enforceMfa(sb());
-    if (!passed) {
-      const c = sb(); if (c) await c.auth.signOut();
-      window.location.href = "index.html";
-      return;
+    // If this account has 2FA enabled but the session is only aal1, the code
+    // hasn't been entered yet — send back to the login page to complete it there.
+    const mfaClient = sb();
+    if (mfaClient && mfaClient.auth.mfa) {
+      try {
+        const aal = await mfaClient.auth.mfa.getAuthenticatorAssuranceLevel();
+        if (aal.data && aal.data.nextLevel === "aal2" && aal.data.currentLevel === "aal1") {
+          window.location.href = "index.html";
+          return;
+        }
+      } catch (e) { /* if the check fails, don't lock the user out */ }
     }
 
     initSecurity();

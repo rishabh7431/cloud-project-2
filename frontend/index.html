@@ -40,6 +40,27 @@
                 class="p-2 border rounded w-full mb-3"
             >
 
+            <!-- 2FA code field: revealed after password if the account has 2FA enabled -->
+            <div id="twofaSection" class="mb-3" hidden>
+                <label for="twofaCode" class="block text-sm text-gray-700 mb-1">
+                    Enter the 6-digit code from your authenticator app
+                </label>
+                <input
+                    id="twofaCode"
+                    type="text"
+                    inputmode="numeric"
+                    autocomplete="one-time-code"
+                    placeholder="6-digit code"
+                    class="p-2 border rounded w-full mb-2"
+                >
+                <button
+                    id="verify2faButton"
+                    class="bg-blue-600 text-white py-2 px-4 rounded w-full"
+                >
+                    Verify code
+                </button>
+            </div>
+
             <button
                 id="loginButton"
                 class="bg-blue-600 text-white py-2 px-4 rounded w-full mb-3"
@@ -75,15 +96,41 @@
     <script>
 
         const authMessage = document.getElementById("authMessage");
+        const client = supabaseClient;
 
-        // Already logged in? Go straight to the dashboard.
+        function setMsg(text, isError) {
+            authMessage.textContent = text || "";
+            authMessage.className =
+                "text-center text-sm mb-4 " + (isError ? "text-red-600" : "text-gray-700");
+        }
+
+        // Reveal the 2FA code field on this page (after password) and hide the sign-in buttons.
+        function show2FA() {
+            document.getElementById("twofaSection").hidden = false;
+            document.getElementById("loginButton").hidden = true;
+            document.getElementById("googleLoginButton").hidden = true;
+            setMsg("Enter the 6-digit code from your authenticator app.", false);
+            document.getElementById("twofaCode").focus();
+        }
+
+        // After a session exists: require 2FA (show the field) or continue to the dashboard.
+        async function proceedAfterAuth() {
+            try {
+                const { data, error } =
+                    await client.auth.mfa.getAuthenticatorAssuranceLevel();
+                if (!error && data &&
+                    data.nextLevel === "aal2" && data.currentLevel === "aal1") {
+                    show2FA();
+                    return;
+                }
+            } catch (e) { /* if the MFA check fails, fall through to the dashboard */ }
+            window.location.href = "dashboard.html";
+        }
+
+        // Already logged in? (may still need to complete 2FA)
         async function checkExistingSession() {
-            const { data } =
-                await supabaseClient.auth.getSession();
-
-            if (data.session) {
-                window.location.href = "dashboard.html";
-            }
+            const { data } = await client.auth.getSession();
+            if (data.session) proceedAfterAuth();
         }
 
         // Email/password login
@@ -91,45 +138,63 @@
             .getElementById("loginButton")
             .addEventListener("click", async () => {
 
-                const email =
-                    document
-                        .getElementById("loginEmail")
-                        .value
-                        .trim();
-
-                const password =
-                    document
-                        .getElementById("loginPassword")
-                        .value;
+                const email = document.getElementById("loginEmail").value.trim();
+                const password = document.getElementById("loginPassword").value;
 
                 if (!email || !password) {
-                    authMessage.textContent =
-                        "Please enter your email and password.";
-
-                    authMessage.className =
-                        "text-center text-sm mb-4 text-red-600";
-
+                    setMsg("Please enter your email and password.", true);
                     return;
                 }
 
                 const { error } =
-                    await supabaseClient.auth.signInWithPassword({
+                    await client.auth.signInWithPassword({
                         email: email,
                         password: password
                     });
 
-                if (error) {
-                    authMessage.textContent =
-                        error.message;
+                if (error) { setMsg(error.message, true); return; }
 
-                    authMessage.className =
-                        "text-center text-sm mb-4 text-red-600";
+                // Signed in with the password — now enforce 2FA if this account has it.
+                proceedAfterAuth();
+            });
 
+        // Verify the 2FA code entered on this page
+        document
+            .getElementById("verify2faButton")
+            .addEventListener("click", async () => {
+                const code = document.getElementById("twofaCode").value.trim();
+                if (!/^\d{6}$/.test(code)) {
+                    setMsg("Enter the 6-digit code.", true);
                     return;
                 }
+                setMsg("Verifying…", false);
+                try {
+                    const factors = await client.auth.mfa.listFactors();
+                    const totp = (((factors.data && factors.data.totp) || [])
+                        .find(function (f) { return f.status === "verified"; }));
+                    if (!totp) throw new Error("No verified authenticator found.");
 
-                // Successful login
-                window.location.href = "/dashboard.html";
+                    const ch = await client.auth.mfa.challenge({ factorId: totp.id });
+                    if (ch.error) throw ch.error;
+
+                    const v = await client.auth.mfa.verify({
+                        factorId: totp.id,
+                        challengeId: ch.data.id,
+                        code: code
+                    });
+                    if (v.error) throw v.error;
+
+                    window.location.href = "dashboard.html";
+                } catch (err) {
+                    setMsg("Verification failed: " + err.message, true);
+                }
+            });
+
+        // Enter key submits the code
+        document
+            .getElementById("twofaCode")
+            .addEventListener("keydown", function (e) {
+                if (e.key === "Enter") document.getElementById("verify2faButton").click();
             });
 
         // Google OAuth login
