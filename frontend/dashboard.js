@@ -611,9 +611,6 @@ const ENDPOINTS = {
 
   /* --------------------------- Cloud cleanup (clear cached data + refresh) --------------------------- */
   function initCleanup() {
-    const toggle = $("cleanupInfoToggle");
-    if (toggle) toggle.addEventListener("click", () => { const i = $("cleanupInfo"); if (i) i.hidden = !i.hidden; });
-
     const btn = $("cleanupBtn"); if (!btn) return;
     btn.addEventListener("click", async () => {
       const msg = $("cleanupMsg");

@@ -170,12 +170,6 @@
                 <p class="text-sm text-gray-600 mb-3">Clears cached data and re-runs the data cleaning step on the current <code>All_Diets.csv</code>, then reloads fresh results. It regenerates the processed/cleaned data &mdash; it does not delete any cloud infrastructure.</p>
                 <button id="cleanupBtn" class="bg-red-600 text-white py-2 px-4 rounded">Clean Up Resources</button>
                 <p id="cleanupMsg" class="text-sm text-green-700 mt-3" role="status"></p>
-                <button id="cleanupInfoToggle" type="button" class="block mt-3 text-sm text-gray-600 underline">How is cloud infrastructure removed?</button>
-                <div id="cleanupInfo" class="mt-2 text-sm text-gray-700" hidden>
-                    <p class="mb-1">Infrastructure teardown is done by an administrator (not from this app), by deleting the resource group:</p>
-                    <pre class="bg-gray-100 rounded p-2 overflow-x-auto"><code>az group delete --name &lt;your-resource-group&gt; --yes</code></pre>
-                    <p class="mt-1">Or via the Azure Portal &rarr; Resource groups &rarr; Delete resource group.</p>
-                </div>
             </div>
         </section>
 
