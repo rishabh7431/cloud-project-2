@@ -4,7 +4,7 @@
    to the Azure Function. Auth is handled separately in dashboard.html
    (Supabase); this script only runs for a signed-in user.
    ========================================================================== */
-const API_BASE = "https://project2-func-gsfhenfdbae0bsh9.eastus-01.azurewebsites.net/api";
+const API_BASE = "https://projectpart3function-fxe6ddgfdhffecc6.canadacentral-01.azurewebsites.net/api";
 const ENDPOINTS = {
   INSIGHTS: API_BASE + "/analyze_diets",
   RECIPES: API_BASE + "/recipes",
@@ -370,23 +370,149 @@ const ENDPOINTS = {
 
   function disableApi(v) { ["getInsights", "getRecipes", "getClusters"].forEach((id) => { const b = $(id); if (b) b.disabled = v; }); }
 
-  /* --------------------------- Account panel + logout --------------------------- */
+  /* --------------------------- Auth: login / sign up / 2FA / gating --------------------------- */
   function sb() { return window.supabaseClient || null; }
+  let authMode = "login"; // or "signup"
 
-  function initAccountPanel(user) {
-    const acct = $("accountPanel"), out = $("signedOutPanel");
-    if (user) {
-      acct.hidden = false; out.hidden = true;
-      $("acctEmail").textContent = user.email || (user.user_metadata && user.user_metadata.email) || "your account";
-      const p = user.app_metadata && user.app_metadata.provider;
-      $("acctProvider").textContent = p ? "· via " + p : "";
-      $("panelLogout").addEventListener("click", async () => {
-        const c = sb(); if (c) await c.auth.signOut();
-        window.location.href = "index.html";
-      });
-    } else {
-      acct.hidden = true; out.hidden = false;
+  // Controls that require the user to be logged in.
+  const GATED = ["getInsights", "getRecipes", "getClusters", "searchInput", "dietFilter", "cleanupBtn"];
+  function gate(enabled) {
+    GATED.forEach((id) => { const el = $(id); if (el) el.disabled = !enabled; });
+    const nav = $("pagination");
+    if (nav) nav.querySelectorAll("button").forEach((b) => { b.disabled = !enabled; });
+    const banner = $("loginBanner"); if (banner) banner.hidden = enabled;
+  }
+
+  function authMsg(m, isError) {
+    const e = $("authMsg"); if (!e) return;
+    e.textContent = m || "";
+    e.className = "text-sm mb-3 " + (isError ? "text-red-600" : "text-gray-700");
+  }
+
+  function setAuthMode(mode) {
+    authMode = mode;
+    const signup = mode === "signup";
+    $("authTitle").textContent = signup ? "Create account" : "Log in";
+    $("authName").hidden = !signup;
+    $("authConfirm").hidden = !signup;
+    $("authPrimary").textContent = signup ? "Register" : "Log in";
+    $("authToggleText").textContent = signup ? "Already have an account?" : "Don't have an account?";
+    $("authToggle").textContent = signup ? "Log in" : "Sign up";
+    $("authTwofa").hidden = true;
+    $("authPrimary").hidden = false;
+    $("authGoogle").hidden = false;
+    authMsg("");
+  }
+
+  function showLoginTwofa() {
+    $("authTwofa").hidden = false;
+    $("authPrimary").hidden = true;
+    $("authGoogle").hidden = true;
+    authMsg("Enter the 6-digit code from your authenticator app.", false);
+    $("authTwofaCode").focus();
+  }
+
+  function displayName(user) {
+    const m = user.user_metadata || {};
+    return m.full_name || m.name || user.email || "Account";
+  }
+
+  function renderLoggedOut() {
+    $("userBox").hidden = true;
+    $("authView").hidden = false;
+    $("accountView").hidden = true;
+    setAuthMode(authMode);
+    gate(false);
+    setStatus("Log in (Account & Security section) to load the dashboard data.");
+  }
+
+  function renderLoggedIn(user) {
+    $("userBox").hidden = false;
+    $("userName").textContent = displayName(user);
+    $("authView").hidden = true;
+    $("accountView").hidden = false;
+    $("acctEmail").textContent = user.email || displayName(user);
+    const prov = user.app_metadata && user.app_metadata.provider;
+    $("acctProvider").textContent = prov ? "· via " + prov : "";
+    gate(true);
+    initSecurity();               // 2FA enroll/disable panel (runs once)
+    if (!insights) loadInsights(); // load data once
+  }
+
+  // After a session exists: require the 2FA code (if enrolled) or show the dashboard.
+  async function afterAuth() {
+    const c = sb(); if (!c) return;
+    try {
+      const { data } = await c.auth.mfa.getAuthenticatorAssuranceLevel();
+      if (data && data.nextLevel === "aal2" && data.currentLevel === "aal1") {
+        $("userBox").hidden = true;
+        $("accountView").hidden = true;
+        $("authView").hidden = false;
+        gate(false);
+        showLoginTwofa();
+        return;
+      }
+    } catch (e) { /* fall through */ }
+    const { data: s } = await c.auth.getSession();
+    if (s && s.session) renderLoggedIn(s.session.user);
+  }
+
+  async function doLoginOrSignup() {
+    const c = sb(); if (!c) return;
+    const email = $("authEmail").value.trim();
+    const password = $("authPassword").value;
+
+    if (authMode === "signup") {
+      const name = $("authName").value.trim();
+      const confirm = $("authConfirm").value;
+      if (!name || !email || !password) { authMsg("Please fill in all fields.", true); return; }
+      if (password.length < 6) { authMsg("Password must be at least 6 characters.", true); return; }
+      if (password !== confirm) { authMsg("Passwords do not match.", true); return; }
+      const { data, error } = await c.auth.signUp({ email: email, password: password, options: { data: { full_name: name } } });
+      if (error) { authMsg(error.message, true); return; }
+      if (data.session) { afterAuth(); }
+      else { authMsg("Account created. Check your email to confirm, then log in.", false); setAuthMode("login"); }
+      return;
     }
+
+    if (!email || !password) { authMsg("Please enter your email and password.", true); return; }
+    const { error } = await c.auth.signInWithPassword({ email: email, password: password });
+    if (error) { authMsg(error.message, true); return; }
+    afterAuth();
+  }
+
+  async function doGoogle() {
+    const c = sb(); if (!c) return;
+    const { error } = await c.auth.signInWithOAuth({
+      provider: "google",
+      options: { redirectTo: window.location.origin + "/dashboard.html" },
+    });
+    if (error) authMsg("Google login failed: " + error.message, true);
+  }
+
+  async function doLoginTwofa() {
+    const c = sb(); if (!c) return;
+    const code = $("authTwofaCode").value.trim();
+    if (!/^\d{6}$/.test(code)) { authMsg("Enter the 6-digit code.", true); return; }
+    authMsg("Verifying…", false);
+    try {
+      const factors = await c.auth.mfa.listFactors();
+      const totp = (((factors.data && factors.data.totp) || []).find((f) => f.status === "verified"));
+      if (!totp) throw new Error("No verified authenticator found.");
+      const ch = await c.auth.mfa.challenge({ factorId: totp.id });
+      if (ch.error) throw ch.error;
+      const v = await c.auth.mfa.verify({ factorId: totp.id, challengeId: ch.data.id, code: code });
+      if (v.error) throw v.error;
+      afterAuth();
+    } catch (err) { authMsg("Verification failed: " + err.message, true); }
+  }
+
+  async function doLogout() {
+    const c = sb(); if (c) await c.auth.signOut();
+    insights = null; activePanel = null;
+    const results = $("results"); if (results) { results.hidden = true; results.innerHTML = ""; }
+    $("authPassword").value = ""; if ($("authTwofaCode")) $("authTwofaCode").value = "";
+    renderLoggedOut();
   }
 
   /* --------------------------- 2FA (Supabase MFA / TOTP) --------------------------- */
@@ -471,62 +597,20 @@ const ENDPOINTS = {
     } catch (err) { mfaMsg("Could not disable 2FA: " + err.message, false); }
   }
 
-  // Enforce 2FA at login: if the user has a verified authenticator but the
-  // session is only aal1, require the code before the dashboard is usable.
-  // Covers both email/password and Google logins (all land on this page).
-  async function enforceMfa(client) {
-    if (!client || !client.auth.mfa) return true;
-    let aal;
-    try {
-      const { data } = await client.auth.mfa.getAuthenticatorAssuranceLevel();
-      aal = data;
-    } catch (e) { return true; } // can't determine → don't lock the user out
-    if (!aal || !(aal.nextLevel === "aal2" && aal.currentLevel === "aal1")) return true;
-
-    return new Promise((resolve) => {
-      const gate = $("mfaGate"), code = $("mfaGateCode"), msg = $("mfaGateMsg");
-      const vBtn = $("mfaGateVerify"), cBtn = $("mfaGateCancel");
-      gate.hidden = false; code.value = ""; msg.textContent = ""; code.focus();
-
-      async function doVerify() {
-        const c = code.value.trim();
-        if (!/^\d{6}$/.test(c)) { msg.className = "text-sm text-red-600 mb-3"; msg.textContent = "Enter the 6-digit code."; return; }
-        msg.className = "text-sm text-gray-600 mb-3"; msg.textContent = "Verifying…";
-        try {
-          const factors = await client.auth.mfa.listFactors();
-          const totp = (((factors.data && factors.data.totp) || []).find((f) => f.status === "verified"));
-          if (!totp) throw new Error("No verified authenticator found.");
-          const ch = await client.auth.mfa.challenge({ factorId: totp.id });
-          if (ch.error) throw ch.error;
-          const v = await client.auth.mfa.verify({ factorId: totp.id, challengeId: ch.data.id, code: c });
-          if (v.error) throw v.error;
-          cleanup(); gate.hidden = true; resolve(true);
-        } catch (err) {
-          msg.className = "text-sm text-red-600 mb-3";
-          msg.textContent = "Verification failed: " + err.message;
-        }
-      }
-      function doCancel() { cleanup(); gate.hidden = true; resolve(false); }
-      function cleanup() { vBtn.removeEventListener("click", doVerify); cBtn.removeEventListener("click", doCancel); }
-      vBtn.addEventListener("click", doVerify);
-      cBtn.addEventListener("click", doCancel);
-      code.addEventListener("keydown", (e) => { if (e.key === "Enter") doVerify(); });
-    });
-  }
-
+  let securityInited = false;
   function initSecurity() {
-    $("enable2fa").addEventListener("click", enable2fa);
-    $("verify2fa").addEventListener("click", verify2fa);
-    $("disable2fa").addEventListener("click", disable2fa);
-    $("cancel2fa").addEventListener("click", () => { mfaShow("enroll"); mfaMsg(""); });
+    if (!securityInited) {
+      securityInited = true;
+      $("enable2fa").addEventListener("click", enable2fa);
+      $("verify2fa").addEventListener("click", verify2fa);
+      $("disable2fa").addEventListener("click", disable2fa);
+      $("cancel2fa").addEventListener("click", () => { mfaShow("enroll"); mfaMsg(""); });
+    }
     refreshMfa();
   }
 
   /* --------------------------- Cloud cleanup (clear cached data + refresh) --------------------------- */
   function initCleanup() {
-    const toggle = $("cleanupInfoToggle");
-    if (toggle) toggle.addEventListener("click", () => { const i = $("cleanupInfo"); if (i) i.hidden = !i.hidden; });
-
     const btn = $("cleanupBtn"); if (!btn) return;
     btn.addEventListener("click", async () => {
       const msg = $("cleanupMsg");
@@ -563,24 +647,18 @@ const ENDPOINTS = {
 
   async function start() {
     initCleanup();
-    let user = null;
-    try {
-      const c = sb();
-      if (c) { const { data } = await c.auth.getSession(); user = data && data.session ? data.session.user : null; }
-    } catch (e) {}
-    initAccountPanel(user);
-    if (!user) return; // anonymous: dashboard.html's auth script handles the redirect
 
-    // Enforce 2FA before the dashboard becomes usable.
-    const passed = await enforceMfa(sb());
-    if (!passed) {
-      const c = sb(); if (c) await c.auth.signOut();
-      window.location.href = "index.html";
-      return;
-    }
+    // Auth controls
+    $("authPrimary").addEventListener("click", doLoginOrSignup);
+    $("authGoogle").addEventListener("click", doGoogle);
+    $("authToggle").addEventListener("click", () => setAuthMode(authMode === "login" ? "signup" : "login"));
+    $("authTwofaVerify").addEventListener("click", doLoginTwofa);
+    $("authTwofaCode").addEventListener("keydown", (e) => { if (e.key === "Enter") doLoginTwofa(); });
+    $("authPassword").addEventListener("keydown", (e) => { if (e.key === "Enter") doLoginOrSignup(); });
+    $("logoutButton").addEventListener("click", doLogout);
+    $("panelLogout").addEventListener("click", doLogout);
 
-    initSecurity();
-
+    // Data controls (remain disabled until logged in)
     $("getInsights").addEventListener("click", () => loadInsights(false));
     $("getRecipes").addEventListener("click", () => loadRecipes(1));
     $("getClusters").addEventListener("click", loadClusters);
@@ -588,7 +666,19 @@ const ENDPOINTS = {
     let t;
     $("searchInput").addEventListener("input", () => { clearTimeout(t); t = setTimeout(onFilterChange, 300); });
 
-    loadInsights();
+    // Start logged-out, then check for an existing session.
+    renderLoggedOut();
+
+    const c = sb();
+    if (!c) { setStatus("Auth is unavailable — Supabase failed to load.", "error"); return; }
+    try {
+      const { data } = await c.auth.getSession();
+      if (data && data.session) await afterAuth();
+    } catch (e) {}
+    c.auth.onAuthStateChange((event, session) => {
+      if (event === "SIGNED_IN" && session) afterAuth();
+      else if (event === "SIGNED_OUT") renderLoggedOut();
+    });
   }
 
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", start);
